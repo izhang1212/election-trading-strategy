@@ -1,0 +1,15 @@
+# downloads and election-night logs (published as the dataset after the election)
+data/raw/
+data/live/
+# secrets
+.env
+*.pem
+*.key
+# generated
+simulation/*.npz
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+# simulation run logs
+simulation/log_*.txt

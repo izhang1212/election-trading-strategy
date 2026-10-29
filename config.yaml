@@ -1,0 +1,124 @@
+# Election-night trading: all tunable inputs in one place.
+# Everything in the `strategy`, `nowcast`, `estimator` and `kill_switch` blocks is FROZEN at v1.0-prereg.
+# Items marked DRAFT are not yet frozen and are open decisions (see PREREGISTRATION.md, "Open before freeze").
+
+mode: record          # record | paper | live   (live also needs --i-understand-live on the command line)
+
+paths:
+  raw: data/raw
+  fitted: data/fitted
+  live: data/live
+
+# ---------------------------------------------------------------- markets (checked against the Kalshi API 2026-10-29)
+kalshi:
+  rest: https://api.elections.kalshi.com/trade-api/v2
+  ws: wss://api.elections.kalshi.com/trade-api/ws/v2
+  key_id_env: KALSHI_API_KEY_ID          # read from .env / environment, never committed
+  private_key_env: KALSHI_PRIVATE_KEY_PATH
+  rest_snapshot_seconds: 30
+  primary:   {TX: SENATETX-26-D, GA: GOVPARTYGA-26-D}   # YES = Democrat wins
+  related: [SENATETX-26-R, GOVPARTYGA-26-R, CONTROLS-2026-D, CONTROLH-2026-D,
+            SENATEIA-26-D, SENATEIA-26-R,     # third market (record-only), PREREGISTRATION.md section 2
+            SENATEGA-26-D, SENATEMI-26-D, SENATEME-26-D, SENATENC-26-D, SENATENH-26-D]   # exploratory
+  fee_rate: 0.07                         # series fee_type=quadratic, fee_multiplier=1
+
+# ---------------------------------------------------------------- results feeds (captured raw by scrape_results.py)
+scrape:
+  user_agent: "election-night-research-recorder/1.0 (academic study; contact via github.com/izhang1212)"
+  targets:
+    - {name: tx_statewide, state: TX, parser: tx_statewide_html, interval: 30, hash_ignore: "<script.*?</script>",
+       url: "https://electionresults.sos.state.tx.us/results.html"}
+    - {name: ga_export, state: GA, parser: ga_export_json, interval: 30,
+       url: "https://results.sos.ga.gov/cdn/results/Georgia/export-2026NovGen.json"}   # slug unconfirmed until it goes live
+    # TX county feeds: capture only (parser: raw). Texas is record-only on the night; county parsers are written
+    # after the election and applied to these files with their receive timestamps (PREREGISTRATION.md section 5).
+    # The 11 counties below cast 61.6% of the 2026 Texas early vote (through Oct 28). Sources checked 2026-10-29.
+    - {name: tx_harris, state: TX, parser: raw, interval: 30, cache_bust: true,
+       url: "https://appfiles.harrisvotes.com/harrisvotes/prd/Data/1126/resultsbyballot.json",
+       also: ["https://appfiles.harrisvotes.com/harrisvotes/prd/Data/1126/pr.json"]}
+    - {name: tx_dallas, state: TX, parser: raw, interval: 30, kind: clarity,
+       base: "https://results.enr.clarityelections.com/TX/Dallas", discover_pages: ["https://www.dallascountyvotes.org/"]}
+    - {name: tx_tarrant, state: TX, parser: raw, interval: 30, kind: clarity, eid: "127297",
+       base: "https://results.enr.clarityelections.com/TX/Tarrant"}
+    - {name: tx_bexar, state: TX, parser: raw, interval: 60, kind: page_links, url: "https://elections.bexar.gov/", hash_ignore: "<script.*?</script>",
+       link_regex: "clarityelections|November-3-2026|Nov.*2026.*(Result|Cumulative)"}
+    - {name: tx_bexar_clarity, state: TX, parser: raw, interval: 30, kind: clarity,
+       base: "https://results.enr.clarityelections.com/TX/Bexar", discover_pages: ["https://elections.bexar.gov/"]}
+    - {name: tx_travis, state: TX, parser: raw, interval: 30, kind: clarity,
+       base: "https://results.enr.clarityelections.com/TX/Travis",
+       discover_pages: ["https://votetravis.gov/current-election-information/election-results-and-reconciliation-forms/"]}
+    - {name: tx_collin, state: TX, parser: raw, interval: 60, kind: page_links,
+       url: "https://www.collincountytx.gov/elections/election-results", hash_ignore: "<script.*?</script>|<input[^>]*__\\w+[^>]*>", link_regex: "november-3-2026|nov.*2026.*\\.(csv|pdf)"}
+    - {name: tx_denton, state: TX, parser: raw, interval: 30, kind: clarity,
+       base: "https://results.enr.clarityelections.com/TX/Denton", discover_pages: ["https://www.votedenton.gov/"]}
+    - {name: tx_fortbend, state: TX, parser: raw, interval: 30, kind: clarity,
+       base: "https://results.enr.clarityelections.com/TX/Fort_Bend"}
+    - {name: tx_williamson, state: TX, parser: raw, interval: 30, kind: clarity,
+       base: "https://results.enr.clarityelections.com/TX/Williamson"}
+    - {name: tx_elpaso, state: TX, parser: raw, interval: 30, kind: clarity, eid: "127348",
+       base: "https://results.enr.clarityelections.com/TX/El_Paso"}
+    - {name: tx_hidalgo, state: TX, parser: raw, interval: 30, kind: clarity,
+       base: "https://results.enr.clarityelections.com/TX/Hidalgo"}
+
+    # Iowa (third market, record-only): statewide Clarity site, county x vote type (Absentee / Election Day)
+    - {name: ia_clarity, state: IA, parser: raw, interval: 30, kind: clarity,
+       base: "https://results.enr.clarityelections.com/IA"}
+
+election_day_clarity: "11/3/2026"   # Clarity elections.json date prefix used to discover election ids
+
+# ---------------------------------------------------------------- county fit (fit_counties.py)
+tx:
+  state_fips: "48"
+  ev_election_id: 53815                   # SOS early-voting app id for the 2026 November general
+  history: {2020: "PRESIDENT/VICE-PRESIDENT", 2022: "GOVERNOR", 2024: "U. S. SENATOR"}
+  year_weights: {2020: 1, 2022: 2, 2024: 1}   # rule: midterm 2, presidential 1, oldest cycle halved
+  twoparty_per_ballot: 0.97              # DRAFT assumption: Senate two-party votes per early ballot cast
+  types:
+    urban_core: [Harris, Dallas, Bexar, Travis]
+    hispanic_min: 0.55                   # non-core county with Hispanic share >= this -> border/Hispanic
+    suburban_max_rucc: 1                 # RUCC 1 = county in a metro of 1M+ -> suburban, else rural/small metro
+ga:
+  state_fips: "13"
+  history: {2018: "GOVERNOR", 2020: "PRESIDENT OF THE UNITED STATES", 2022: "GOVERNOR", 2024: "PRESIDENT OF THE US"}
+  year_weights: {2018: 1, 2020: 1, 2022: 2, 2024: 1}   # same rule (2018 = midterm 2 x oldest 0.5)
+  twoparty_per_ballot: 0.98              # DRAFT
+  types:
+    urban_core: [Fulton, DeKalb, Clayton, Chatham, Richmond, Muscogee, Bibb, Clarke]
+    suburban_max_rucc: 1
+    black_belt_min: 0.35
+
+# ---------------------------------------------------------------- nowcast (nowcast.py; = simulation/world.py SIG under scenario v2)
+nowcast:
+  sig: {s: 0.03, f: 0.025, g: 0.055, e: 0.02, b_early: 0.003, b_ed: 0.012}   # g = cross-cycle sd of the ED-early gap (TX 0.054, GA 0.062); simulation used 0.02
+  ed_common: 0.25             # relative sd of outstanding ED volume shared statewide (simulation/surge_study.md)
+  ed_learn: true              # learn the statewide ED-volume ratio from counties already reporting ED
+  prior_anchor: last_mid_before_first_batch     # statewide level calibrated to this market price
+
+# ---------------------------------------------------------------- strategy (strategy.py; = simulation/sim_strategy.py)
+strategy:
+  decision_seconds: 60
+  buffer: 0.03
+  move_filter: 0.01
+  move_filter_rule: gt          # "moved more than 1c" (as written); the simulation cannot distinguish gt/ge
+  filter_window_minutes: 1      # SET AFTER THE NOV 1-2 DRY RUN: ceil(median measured data latency), floor 1, cap 5
+  kelly: 0.25
+  max_exposure: 0.50
+  exit_price: 0.97
+  bankroll: 100
+  max_contracts_per_order: 500
+
+kill_switch:
+  stale_feed_minutes: 10        # no new results file while precincts are still outstanding
+  max_model_market_gap: 0.25    # |fair - mid| above this is presumed to be our bug
+  max_parse_errors: 3           # consecutive parse failures on a target
+
+# ---------------------------------------------------------------- naive-share estimator (estimate_naive.py)
+estimator:
+  w_grid: [0.0, 0.60, 0.02]     # start, stop (inclusive), step
+  lags: [1, 10]
+  kappas: [0.3, 0.5, 0.8]
+  tmax: 180                     # minutes after the first batch
+  naive_sigma: [0.06, 0.003]    # sd of the naive signal = a*sqrt(1-frac) + b
+  window_end: first_media_call
+  bootstrap: {n: 500, block_minutes: 10, level: 0.90}
+  h1_lower_bound: 0.10
